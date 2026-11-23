@@ -11,9 +11,10 @@ st.title("🩺 Yours — Klinik Asistan")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/drive.file"]
-creds = service_account.Credentials.from_service_account_info(
-    dict(st.secrets["gcp_service_account"]), scopes=SCOPES
-)
+
+gcp_info = dict(st.secrets["gcp_service_account"])
+gcp_info["private_key"] = gcp_info["private_key"].replace("\\n", "\n")
+creds = service_account.Credentials.from_service_account_info(gcp_info, scopes=SCOPES)
 
 calendar_service = build("calendar", "v3", credentials=creds)
 drive_service = build("drive", "v3", credentials=creds)
