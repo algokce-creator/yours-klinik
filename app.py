@@ -5,15 +5,15 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import datetime
 import io
-import json
 
 st.set_page_config(page_title="Yours Klinik", page_icon="🩺", layout="centered")
 st.title("🩺 Yours — Klinik Asistan")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/drive.file"]
-creds_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
-creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+creds = service_account.Credentials.from_service_account_info(
+    dict(st.secrets["gcp_service_account"]), scopes=SCOPES
+)
 
 calendar_service = build("calendar", "v3", credentials=creds)
 drive_service = build("drive", "v3", credentials=creds)
