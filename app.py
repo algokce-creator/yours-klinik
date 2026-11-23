@@ -10,7 +10,6 @@ import json
 st.set_page_config(page_title="Yours Klinik", page_icon="🩺", layout="centered")
 st.title("🩺 Yours — Klinik Asistan")
 
-# Secrets üzerinden anahtarları oku
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/drive.file"]
 creds_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
@@ -19,13 +18,8 @@ creds = service_account.Credentials.from_service_account_info(creds_info, scopes
 calendar_service = build("calendar", "v3", credentials=creds)
 drive_service = build("drive", "v3", credentials=creds)
 
-# 1. Hasta Kodu / Başlık
 hasta_kodu = st.text_input("Hasta Kodu veya Adı", placeholder="Örn: AG-001")
-
-# 2. Doğrudan Tarayıcı Mikrofonu ile Ses Kaydı
 ses_verisi = st.audio_input("Muayene Notunu Sesli Kaydet")
-
-# 3. İsteğe Bağlı Röntgen / MR / Klinik Fotoğraf
 gorseller = st.file_uploader(
     "Röntgen / Klinik Fotoğraf Ekle (İsteğe Bağlı)",
     type=["jpg", "jpeg", "png"],
@@ -37,7 +31,6 @@ if st.button("✨ Özetle ve Takvim / Drive'a İşle", type="primary", use_conta
         st.warning("Lütfen önce mikrofon simgesine basıp ses kaydı alın.")
     else:
         with st.spinner("Ses çözülüyor ve klinik özet hazırlanıyor..."):
-            # Whisper ile sesten metne
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=("kayit.wav", ses_verisi.getvalue(), "audio/wav"),
@@ -45,7 +38,6 @@ if st.button("✨ Özetle ve Takvim / Drive'a İşle", type="primary", use_conta
             )
             ham_metin = transcript.text
 
-            # GPT-4o-mini ile SOAP özeti
             yanit = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.2,
@@ -64,7 +56,6 @@ if st.button("✨ Özetle ve Takvim / Drive'a İşle", type="primary", use_conta
             )
             ozet_not = yanit.choices[0].message.content.strip()
 
-            # Görseller varsa Google Drive'a yükle ve linklerini ekle
             drive_linkleri = []
             if gorseller:
                 for dosya in gorseller:
@@ -78,7 +69,6 @@ if st.button("✨ Özetle ve Takvim / Drive'a İşle", type="primary", use_conta
             if drive_linkleri:
                 aciklama_metni += "\n\n--- Ekli Görüntüler ---\n" + "\n".join(drive_linkleri)
 
-            # Google Takvim'e 15 dakikalık etkinlik olarak işle
             baslangic = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=3)))
             bitis = baslangic + datetime.timedelta(minutes=15)
             etkinlik = {
