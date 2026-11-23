@@ -3,8 +3,10 @@ from openai import OpenAI
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+import base64
 import datetime
 import io
+import json
 
 st.set_page_config(page_title="Yours Klinik", page_icon="🩺", layout="centered")
 st.title("🩺 Yours — Klinik Asistan")
@@ -12,8 +14,7 @@ st.title("🩺 Yours — Klinik Asistan")
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 SCOPES = ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/drive.file"]
 
-gcp_info = dict(st.secrets["gcp_service_account"])
-gcp_info["private_key"] = gcp_info["private_key"].replace("\\n", "\n")
+gcp_info = json.loads(base64.b64decode(st.secrets["GCP_KEY_B64"]).decode("utf-8"))
 creds = service_account.Credentials.from_service_account_info(gcp_info, scopes=SCOPES)
 
 calendar_service = build("calendar", "v3", credentials=creds)
