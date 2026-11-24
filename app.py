@@ -234,7 +234,7 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
             }
         ).execute()
 
-        # Otomatik Kontrol / İleri Tarihli Hatırlatma Kaydı
+        # Otomatik Kontrol / İleri Tarihli Hatırlatma Kaydı (1 Gün Önce ve 2 Saat Önce Uyarılı)
         kontrol_tarihi = ai_data.get("kontrol_tarihi")
         if kontrol_tarihi:
             k_title = (
@@ -250,6 +250,14 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
                     "colorId": "11" if ai_data.get("tur") == "KLINIK" else "5",
                     "start": {"dateTime": f"{kontrol_tarihi}T10:00:00", "timeZone": "Europe/Istanbul"},
                     "end": {"dateTime": f"{kontrol_tarihi}T10:30:00", "timeZone": "Europe/Istanbul"},
+                    "reminders": {
+                        "useDefault": False,
+                        "overrides": [
+                            {"method": "popup", "minutes": 1440},  # 1 gün önce bildirim
+                            {"method": "popup", "minutes": 120},   # 2 saat önce bildirim
+                            {"method": "email", "minutes": 1440},  # 1 gün önce e-posta özeti
+                        ],
+                    },
                 }
             ).execute()
 
@@ -258,4 +266,4 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
     for m in ai_data.get("ozet_maddeler", []):
         st.markdown(f"- {m}")
     if kontrol_tarihi:
-        st.info(f"📅 Otomatik takip/hatırlatma eklendi: **{kontrol_tarihi}** — {ai_data.get('kontrol_aciklama')}")
+        st.info(f"📅 Otomatik takip/hatırlatma eklendi (1 gün ve 2 saat önce uyarılı): **{kontrol_tarihi}** — {ai_data.get('kontrol_aciklama')}")
