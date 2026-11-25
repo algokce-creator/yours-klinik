@@ -8,8 +8,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-# --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Yours — Klinik & Kişisel Asistan", page_icon="🩺", layout="centered")
+st.set_page_config(page_title="Yours — Klinik & Yaşam Asistanı", page_icon="🩺", layout="centered")
 
 # --- 1. PIN KORUMASI ---
 if "authenticated" not in st.session_state:
@@ -27,15 +26,40 @@ if not st.session_state.authenticated:
             st.error("❌ Hatalı PIN kodu.")
     st.stop()
 
-# --- API & GOOGLE BAĞLANTILARI ---
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 def get_google_services():
-    creds_info = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
-    creds = Credentials.from_authorized_user_info(creds_info)
-    cal_service = build("calendar", "v3", credentials=creds)
-    drive_service = build("drive", "v3", credentials=creds)
-    return cal_service, drive_service
+    possible_keys = [
+        "GOOGLE_CREDENTIALS_JSON",
+        "GOOGLE_CREDENTIALS",
+        "google_credentials",
+        "GOOGLE_TOKEN_JSON",
+        "gcp_service_account",
+        "GOOGLE_SERVICE_ACCOUNT",
+    ]
+    raw_creds = None
+    for k in possible_keys:
+        if k in st.secrets:
+            raw_creds = st.secrets[k]
+            break
+
+    if raw_creds is None:
+        st.error(f"Google kimlik anahtarı bulunamadı. Mevcut Secrets anahtarları: {list(st.secrets.keys())}")
+        st.stop()
+
+    creds_info = json.loads(raw_creds) if isinstance(raw_creds, str) else dict(raw_creds)
+
+    if creds_info.get("type") == "service_account":
+        from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+        scopes = [
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = ServiceAccountCredentials.from_service_account_info(creds_info, scopes=scopes)
+    else:
+        creds = Credentials.from_authorized_user_info(creds_info)
+
+    return build("calendar", "v3", credentials=creds), build("drive", "v3", credentials=creds)
 
 def get_or_create_folder(drive_service, folder_name, parent_id):
     query = (
@@ -54,13 +78,11 @@ def get_or_create_folder(drive_service, folder_name, parent_id):
     folder = drive_service.files().create(body=file_metadata, fields="id").execute()
     return folder["id"]
 
-# --- SESSION STATE BAŞLATMA ---
 if "transcript_text" not in st.session_state:
     st.session_state.transcript_text = ""
 if "last_audio_bytes" not in st.session_state:
     st.session_state.last_audio_bytes = None
 
-# --- ANA ARAYÜZ ---
 st.title("🩺 Yours — Klinik & Yaşam Asistanı")
 
 record_mode = st.radio(
@@ -78,23 +100,22 @@ if "Klinik" in record_mode:
     with col1:
         protocol_no = st.text_input("Protokol No", value=f"{year_str}-{now.strftime('%m%d%H%M')}")
     with col2:
-        patient_code = st.text_input("Hasta Kodu / Baş Harf", placeholder="Örn: A.Y. veya AG-042")
+        patient_code = st.text_input("Hasta Kodu / Baş Harf", placeholder="Boş kalırsa Atanmamış")
     with col3:
         region = st.selectbox(
             "Anatomik Bölge",
             ["Diz", "Omuz", "Kalça", "Ayak / Ayak Bileği", "Omurga", "El / El Bileği", "Diğer"]
         )
-    diagnosis_hint = st.text_input("Ön Tanı / İşlem (İsteğe Bağlı)", placeholder="Örn: Medial Gonartroz, OW-HTO, PRP")
+    diagnosis_hint = st.text_input("Ön Tanı / İşlem (İsteğe Bağlı)", placeholder="Örn: 2. Metatars Ödem, OW-HTO, PRP")
 else:
     personal_category = st.selectbox(
         "Kişisel Kategori",
         ["📌 Hatırlatma / Görev", "🛒 Alışveriş Listesi", "🎭 Sosyal / Aile / Etkinlik", "💡 Genel Fikir / Not"]
     )
 
-# --- SES KAYDI VEYA DOSYA YÜKLEME ---
 st.subheader("1. Ses Kaydı Al veya Yükle")
 audio_value = st.audio_input("Mikrofona basıp konuşun")
-uploaded_audio = st.file_uploader("Veya çevrimdışı ses dosyası yükleyin (m4a, mp3, wav)", type=["m4a", "mp3", "wav"])
+uploaded_audio = st.file_uploader("Veya telefon kaydedicisi / çevrimdışı ses yükleyin (m4a, mp3, wav)", type=["m4a", "mp3", "wav"])
 
 active_audio = audio_value if audio_value is not None else uploaded_audio
 
@@ -112,15 +133,13 @@ if active_audio is not None:
             )
             st.session_state.transcript_text = transcript.text
 
-# --- TRANSKRİPT DÜZENLEME (HUMAN-IN-THE-LOOP) ---
 edited_transcript = st.text_area(
-    "2. Ham Metin (Gerekirse tıbbi terimleri veya detayları düzeltip onaylayın):",
+    "2. Ham Metin (Gerekirse tıbbi terimleri düzeltip onaylayın):",
     value=st.session_state.transcript_text,
     height=130,
     placeholder="Ses kaydı yaptığınızda metin burada görünecek..."
 )
 
-# --- GÖRSEL / RÖNTGEN YÜKLEME ---
 uploaded_images = []
 if "Klinik" in record_mode:
     uploaded_images = st.file_uploader(
@@ -129,18 +148,16 @@ if "Klinik" in record_mode:
         accept_multiple_files=True
     )
 
-# --- İŞLEME VE KAYDETME ---
 if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_container_width=True):
     if not edited_transcript.strip():
         st.warning("Lütfen önce ses kaydı alın veya metin girin.")
         st.stop()
 
-    with st.spinner("Yapay zeka analiz ediyor, kontrol tarihi hesaplıyor ve kaydediyor..."):
+    with st.spinner("Yapay zeka analiz ediyor ve kaydediyor..."):
         cal_service, drive_service = get_google_services()
-        root_folder_id = st.secrets["DRIVE_FOLDER_ID"]
+        root_folder_id = st.secrets.get("DRIVE_FOLDER_ID") or st.secrets.get("drive_folder_id")
         today_iso = now.strftime("%Y-%m-%d")
 
-        # GPT Yapılandırılmış Çıktı (JSON)
         system_prompt = f"""
         Bugünün tarihi: {today_iso}.
         Sen Prof. Dr. Alper Gökçe'nin (Ortopedi ve Travmatoloji Uzmanı) akıllı asistanısın.
@@ -149,8 +166,8 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
         Kurallar:
         - Eğer metin tıbbi değil de kişisel/sosyal/alışveriş notu ise 'tur' alanını 'KISISEL' yap.
         - Eğer tıbbi ise 'tur' alanını 'KLINIK' yap, ortopedik terminolojiyi koru.
-        - Metinde '2 hafta sonra kontrol', '10 gün sonra pansuman', 'yarın saat 15:00' gibi ileri tarihli bir eylem varsa 'kontrol_tarihi' alanını 'YYYY-MM-DD' formatında hesapla; yoksa null yap.
-        - 'kontrol_aciklama' alanına kısa hatırlatma başlığı yaz.
+        - Metinde ileri tarihli bir kontrol, pansuman veya hatırlatma geçiyorsa 'kontrol_tarihi' alanını 'YYYY-MM-DD' formatında hesapla; yoksa null yap.
+        - 'intermedya_metni' alanına İntermedya hasta dosyasına doğrudan yapıştırılabilecek kısa, resmi epikriz/muayene cümlesi yaz (hasta adı geçiyorsa maskeleme yapma, doğrudan klinik ifade yaz).
 
         JSON Şeması:
         {{
@@ -158,6 +175,7 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
           "baslik": "Kısa başlık (Tanı veya Konu)",
           "ozet_maddeler": ["Madde 1", "Madde 2", "Madde 3"],
           "icd10_onerisi": "Tıbbi ise olası ICD-10 kodu ve adı, değilse boş",
+          "intermedya_metni": "İntermedya kartına yapıştırılacak resmi klinik özet",
           "kontrol_tarihi": "YYYY-MM-DD veya null",
           "kontrol_aciklama": "Kontrol veya hatırlatma açıklaması veya null"
         }}
@@ -174,53 +192,45 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
         )
         ai_data = json.loads(response.choices[0].message.content)
 
-        # Kayıt Türüne Göre Akış
         if ai_data.get("tur") == "KLINIK" and "Klinik" in record_mode:
-            safe_code = patient_code.strip() if patient_code.strip() else "ANONIM"
+            safe_code = patient_code.strip() if patient_code.strip() else f"ATANMAMIS_{now.strftime('%H%M')}"
             diag_text = diagnosis_hint.strip() if diagnosis_hint.strip() else ai_data.get("baslik", "Klinik Değerlendirme")
-            
-            # Drive Klasör Hiyerarşisi: Klinik_Dosyalar / 2026 / 2026-042_Kod
-            year_folder_id = get_or_create_folder(drive_service, year_str, root_folder_id)
-            patient_folder_name = f"{protocol_no}_{safe_code}".replace(" ", "_")
-            patient_folder_id = get_or_create_folder(drive_service, patient_folder_name, year_folder_id)
 
-            # Ham Ses Yedeğini Drive'a Kaydet
-            if st.session_state.last_audio_bytes:
-                audio_media = MediaIoBaseUpload(io.BytesIO(st.session_state.last_audio_bytes), mimetype="audio/wav")
-                drive_service.files().create(
-                    body={"name": f"{protocol_no}_Ses_{date_stamp}.wav", "parents": [patient_folder_id]},
-                    media_body=audio_media
-                ).execute()
+            if root_folder_id:
+                year_folder_id = get_or_create_folder(drive_service, year_str, root_folder_id)
+                patient_folder_name = f"{protocol_no}_{safe_code}".replace(" ", "_")
+                patient_folder_id = get_or_create_folder(drive_service, patient_folder_name, year_folder_id)
 
-            # Röntgen / Görselleri Yükle
-            for idx, img in enumerate(uploaded_images, start=1):
-                img_media = MediaIoBaseUpload(io.BytesIO(img.getvalue()), mimetype=img.type)
-                ext = os.path.splitext(img.name)[1] or ".jpg"
-                drive_service.files().create(
-                    body={"name": f"{protocol_no}_{region}_Gorsel_{idx}_{date_stamp}{ext}", "parents": [patient_folder_id]},
-                    media_body=img_media
-                ).execute()
+                if st.session_state.last_audio_bytes:
+                    audio_media = MediaIoBaseUpload(io.BytesIO(st.session_state.last_audio_bytes), mimetype="audio/wav")
+                    drive_service.files().create(
+                        body={"name": f"{protocol_no}_Ses_{date_stamp}.wav", "parents": [patient_folder_id]},
+                        media_body=audio_media
+                    ).execute()
 
-            # Takvim Etkinliği (KVKK Anonim: Hasta gerçek adı yok, sadece Protokol + Bölge + Tanı)
+                for idx, img in enumerate(uploaded_images, start=1):
+                    img_media = MediaIoBaseUpload(io.BytesIO(img.getvalue()), mimetype=img.type)
+                    ext = os.path.splitext(img.name)[1] or ".jpg"
+                    drive_service.files().create(
+                        body={"name": f"{protocol_no}_{region}_Gorsel_{idx}_{date_stamp}{ext}", "parents": [patient_folder_id]},
+                        media_body=img_media
+                    ).execute()
+
             cal_title = f"[{protocol_no}] - [{region}] - [{diag_text}]"
             bullets_str = "\n".join([f"• {m}" for m in ai_data.get("ozet_maddeler", [])])
             cal_desc = (
                 f"Hasta Kodu: {safe_code}\n"
                 f"ICD-10 Önerisi: {ai_data.get('icd10_onerisi', '-')}\n\n"
-                f"Klinik Özet:\n{bullets_str}\n\n"
-                f"Ham Not: {edited_transcript}"
+                f"Klinik Özet:\n{bullets_str}"
             )
-            color_id = "9"  # Lacivert (Klinik)
-
+            color_id = "9"
         else:
-            # Kişisel / Sosyal / Alışveriş Akışı
             cat_label = personal_category if "Kişisel" in record_mode else "📌 Kişisel/Sosyal"
             cal_title = f"{cat_label}: {ai_data.get('baslik', 'Kişisel Not')}"
             bullets_str = "\n".join([f"• {m}" for m in ai_data.get("ozet_maddeler", [])])
             cal_desc = f"{bullets_str}\n\nDetay: {edited_transcript}"
-            color_id = "2"  # Adaçayı Yeşili (Kişisel/Sosyal)
+            color_id = "2"
 
-        # Ana Takvim Kaydı
         event_start = now.isoformat()
         event_end = (now + timedelta(minutes=20)).isoformat()
         cal_service.events().insert(
@@ -234,7 +244,6 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
             }
         ).execute()
 
-        # Otomatik Kontrol / İleri Tarihli Hatırlatma Kaydı (1 Gün Önce ve 2 Saat Önce Uyarılı)
         kontrol_tarihi = ai_data.get("kontrol_tarihi")
         if kontrol_tarihi:
             k_title = (
@@ -253,17 +262,18 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
                     "reminders": {
                         "useDefault": False,
                         "overrides": [
-                            {"method": "popup", "minutes": 1440},  # 1 gün önce bildirim
-                            {"method": "popup", "minutes": 120},   # 2 saat önce bildirim
-                            {"method": "email", "minutes": 1440},  # 1 gün önce e-posta özeti
+                            {"method": "popup", "minutes": 1440},
+                            {"method": "popup", "minutes": 120},
+                            {"method": "email", "minutes": 1440},
                         ],
                     },
                 }
             ).execute()
 
-    st.success("✅ Kayıt başarıyla işlendi!")
+    st.success("✅ Kayıt başarıyla Takvim ve Drive'a işlendi!")
     st.markdown(f"**Başlık:** `{cal_title}`")
-    for m in ai_data.get("ozet_maddeler", []):
-        st.markdown(f"- {m}")
+    if ai_data.get("tur") == "KLINIK":
+        st.caption("📋 İntermedya'ya Yapıştırılacak Metin (Sağ üstteki kopyala ikonuna basın):")
+        st.code(ai_data.get("intermedya_metni", ""), language=None)
     if kontrol_tarihi:
-        st.info(f"📅 Otomatik takip/hatırlatma eklendi (1 gün ve 2 saat önce uyarılı): **{kontrol_tarihi}** — {ai_data.get('kontrol_aciklama')}")
+        st.info(f"📅 Otomatik takip/hatırlatma eklendi: **{kontrol_tarihi}** — {ai_data.get('kontrol_aciklama')}")
