@@ -10,12 +10,19 @@ from googleapiclient.http import MediaIoBaseUpload
 
 st.set_page_config(page_title="Yours — Klinik & Yaşam Asistanı", page_icon="🩺", layout="centered")
 
+# --- MACRODROID PAYLAŞIM PARAMETRESİNİ YAKALA (PIN ÖNCESİ KORUMA) ---
+incoming_text = st.query_params.get("metin", "")
+if incoming_text and "pending_shared_text" not in st.session_state:
+    st.session_state.pending_shared_text = incoming_text
+
 # --- 1. PIN KORUMASI ---
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
     st.title("🔐 Yours — Güvenli Giriş")
+    if st.session_state.get("pending_shared_text"):
+        st.info("📲 Telefondan aktarılan ses metni hazır bekliyor. Devam etmek için PIN girin.")
     pin_input = st.text_input("Klinik PIN Kodunu Girin:", type="password")
     if st.button("Giriş Yap", type="primary"):
         correct_pin = str(st.secrets.get("CLINIC_PIN", "1968"))
@@ -78,10 +85,16 @@ def get_or_create_folder(drive_service, folder_name, parent_id):
     folder = drive_service.files().create(body=file_metadata, fields="id").execute()
     return folder["id"]
 
+# --- SESSION STATE BAŞLATMA & MACRODROID METNİNİ AKTARMA ---
 if "transcript_text" not in st.session_state:
     st.session_state.transcript_text = ""
 if "last_audio_bytes" not in st.session_state:
     st.session_state.last_audio_bytes = None
+
+if st.session_state.get("pending_shared_text"):
+    st.session_state.transcript_text = st.session_state.pending_shared_text
+    del st.session_state.pending_shared_text
+    st.query_params.clear()
 
 st.title("🩺 Yours — Klinik & Yaşam Asistanı")
 
@@ -113,9 +126,9 @@ else:
         ["📌 Hatırlatma / Görev", "🛒 Alışveriş Listesi", "🎭 Sosyal / Aile / Etkinlik", "💡 Genel Fikir / Not"]
     )
 
-st.subheader("1. Ses Kaydı Al veya Yükle")
-audio_value = st.audio_input("Mikrofona basıp konuşun")
-uploaded_audio = st.file_uploader("Veya telefon kaydedicisi / çevrimdışı ses yükleyin (m4a, mp3, wav)", type=["m4a", "mp3", "wav"])
+st.subheader("1. Ses Kaydı Al veya Dosya Yükle")
+audio_value = st.audio_input("Doğrudan tarayıcıdan konuşun")
+uploaded_audio = st.file_uploader("Veya Xiaomi Ses Kaydedici dosyasını yükleyin (m4a, mp3, wav)", type=["m4a", "mp3", "wav"])
 
 active_audio = audio_value if audio_value is not None else uploaded_audio
 
@@ -134,10 +147,10 @@ if active_audio is not None:
             st.session_state.transcript_text = transcript.text
 
 edited_transcript = st.text_area(
-    "2. Ham Metin (Gerekirse tıbbi terimleri düzeltip onaylayın):",
+    "2. Ham Metin (Xiaomi kaydediciden aktarılan veya sesle dökülen metin):",
     value=st.session_state.transcript_text,
     height=130,
-    placeholder="Ses kaydı yaptığınızda metin burada görünecek..."
+    placeholder="MacroDroid ile paylaştığınızda veya ses kaydı aldığınızda metin burada görünecek..."
 )
 
 uploaded_images = []
@@ -153,7 +166,7 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
         st.warning("Lütfen önce ses kaydı alın veya metin girin.")
         st.stop()
 
-    with st.spinner("Yapay zeka analiz ediyor ve kaydediyor..."):
+    with st.spinner("Yapay zeka analiz ediyor ve Takvim / Drive'a işliyor..."):
         cal_service, drive_service = get_google_services()
         root_folder_id = st.secrets.get("DRIVE_FOLDER_ID") or st.secrets.get("drive_folder_id")
         today_iso = now.strftime("%Y-%m-%d")
@@ -167,7 +180,7 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
         - Eğer metin tıbbi değil de kişisel/sosyal/alışveriş notu ise 'tur' alanını 'KISISEL' yap.
         - Eğer tıbbi ise 'tur' alanını 'KLINIK' yap, ortopedik terminolojiyi koru.
         - Metinde ileri tarihli bir kontrol, pansuman veya hatırlatma geçiyorsa 'kontrol_tarihi' alanını 'YYYY-MM-DD' formatında hesapla; yoksa null yap.
-        - 'intermedya_metni' alanına İntermedya hasta dosyasına doğrudan yapıştırılabilecek kısa, resmi epikriz/muayene cümlesi yaz (hasta adı geçiyorsa maskeleme yapma, doğrudan klinik ifade yaz).
+        - 'intermedya_metni' alanına İntermedya hasta dosyasına doğrudan yapıştırılabilecek kısa, resmi epikriz/muayene cümlesi yaz.
 
         JSON Şeması:
         {{
@@ -273,7 +286,7 @@ if st.button("✨ Onayla ve Takvim / Drive'a İşle", type="primary", use_contai
     st.success("✅ Kayıt başarıyla Takvim ve Drive'a işlendi!")
     st.markdown(f"**Başlık:** `{cal_title}`")
     if ai_data.get("tur") == "KLINIK":
-        st.caption("📋 İntermedya'ya Yapıştırılacak Metin (Sağ üstteki kopyala ikonuna basın):")
+        st.caption("📋 İntermedya'ya Yapıştırılacak Metin:")
         st.code(ai_data.get("intermedya_metni", ""), language=None)
     if kontrol_tarihi:
         st.info(f"📅 Otomatik takip/hatırlatma eklendi: **{kontrol_tarihi}** — {ai_data.get('kontrol_aciklama')}")
