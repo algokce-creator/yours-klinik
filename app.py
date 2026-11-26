@@ -1,5 +1,5 @@
-import os
 import json
+import base64
 import urllib.parse
 from datetime import datetime, timedelta
 import streamlit as st
@@ -38,7 +38,8 @@ SCOPES = [
 
 @st.cache_resource
 def get_google_services():
-    creds_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    raw_json = base64.b64decode(st.secrets["GCP_KEY_B64"]).decode("utf-8")
+    creds_info = json.loads(raw_json)
     creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     cal_service = build("calendar", "v3", credentials=creds)
     drive_service = build("drive", "v3", credentials=creds)
@@ -47,8 +48,8 @@ def get_google_services():
 
 cal_service, drive_service, gc = get_google_services()
 SHEET_ID = st.secrets["GOOGLE_SHEET_ID"]
-CALENDAR_ID = st.secrets.get("GOOGLE_CALENDAR_ID", "primary")
-ROOT_DRIVE_FOLDER = st.secrets.get("GOOGLE_DRIVE_FOLDER_ID", "")
+CALENDAR_ID = st.secrets.get("CALENDAR_ID", "primary")
+ROOT_DRIVE_FOLDER = st.secrets.get("DRIVE_FOLDER_ID", "")
 
 def get_or_create_is_listesi_ws():
     sh = gc.open_by_key(SHEET_ID)
@@ -137,7 +138,6 @@ with col_t2:
         st.session_state.rol = None
         st.rerun()
 
-# MacroDroid URL parametresinden gelen metni otomatik yakala (?metin=...)
 gelen_metin = st.query_params.get("metin", "")
 
 st.subheader("1. Ses veya Metin Girişi")
@@ -158,7 +158,6 @@ yuklenen_gorseller = st.file_uploader(
 if st.button("✨ Onayla ve Takvim / Drive / Asistan Masasına İşle", type="primary", use_container_width=True):
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-    # Ses dosyası yüklendiyse Whisper ile metne çevir
     if ses_dosyasi is not None:
         with st.spinner("Ses kaydı yazıya dönüştürülüyor..."):
             transkript = client.audio.transcriptions.create(
@@ -210,13 +209,12 @@ if st.button("✨ Onayla ve Takvim / Drive / Asistan Masasına İşle", type="pr
     etkinlik = {
         "summary": veri.get("takvim_baslik", "Klinik Not"),
         "description": veri.get("intermedya_epikriz", ham_metin),
-        "colorId": "11" if veri.get("tur") == "klinik" else "10",  # 11: Kırmızı (Klinik), 10: Yeşil (Kişisel)
+        "colorId": "11" if veri.get("tur") == "klinik" else "10",
         "start": {"dateTime": baslangic_dt.isoformat(), "timeZone": "Europe/Istanbul"},
         "end": {"dateTime": bitis_dt.isoformat(), "timeZone": "Europe/Istanbul"},
     }
     cal_service.events().insert(calendarId=CALENDAR_ID, body=etkinlik).execute()
 
-    # Kontrol randevusu varsa 1 gün + 2 saat hatırlatmalı ikinci etkinlik oluştur
     if veri.get("kontrol_var_mi") and veri.get("kontrol_tarihi"):
         k_dt = datetime.strptime(veri["kontrol_tarihi"], "%Y-%m-%d").replace(hour=10, minute=0)
         kontrol_etkinlik = {
@@ -228,8 +226,8 @@ if st.button("✨ Onayla ve Takvim / Drive / Asistan Masasına İşle", type="pr
             "reminders": {
                 "useDefault": False,
                 "overrides": [
-                    {"method": "popup", "minutes": 1440},  # 1 gün önce
-                    {"method": "popup", "minutes": 120},   # 2 saat önce
+                    {"method": "popup", "minutes": 1440},
+                    {"method": "popup", "minutes": 120},
                 ],
             },
         }
