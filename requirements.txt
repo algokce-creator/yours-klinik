@@ -1,5 +1,5 @@
 streamlit
 openai
-google-api-python-client
+gspread
 google-auth
-Pillow
+google-api-python-client
