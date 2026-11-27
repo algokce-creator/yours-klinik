@@ -902,4 +902,4 @@ with tab_brifing:
                 type="primary", use_container_width=True,
             )
         else:
-            st.warning("WhatsApp butonu için Secrets'a `ASISTAN_TEL = \"905XXXXXXXXX\"` ekleyin.")
+            st.warning("WhatsApp butonu için Secrets'a `ASISTAN_TEL = \"905300874437\"` ekleyin.")
