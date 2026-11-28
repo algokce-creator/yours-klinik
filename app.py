@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 import gspread
+from PIL import Image
 from google.oauth2.service_account import Credentials as SACredentials
 from google.oauth2.credentials import Credentials as UserCredentials
 from googleapiclient.discovery import build
@@ -110,7 +111,7 @@ if not st.session_state.rol:
     st.stop()
 
 # ==============================================================================
-# 2. GOOGLE SERVİSLERİ
+# 2. GOOGLE SERVİSLERİ + BROKEN PIPE YENİDEN DENEME KORUMASI
 # ==============================================================================
 SCOPES = [
     "https://www.googleapis.com/auth/calendar",
@@ -135,6 +136,22 @@ def google_servisleri():
     drv = build("drive", "v3", credentials=drive_creds, cache_discovery=False)
     gc_ = gspread.authorize(sa_creds)
     return cal, drv, gc_
+
+
+def baglanti_korumali(fn, deneme: int = 3):
+    """[Errno 32] Broken pipe veya soket düşmelerinde servis önbelleğini yenileyip tekrar dener."""
+    for i in range(deneme):
+        try:
+            return fn()
+        except Exception as e:
+            hata_str = str(e)
+            if any(k in hata_str for k in ("Broken pipe", "Connection", "104", "503", "500")) and i < deneme - 1:
+                google_servisleri.clear()
+                is_listesi.clear()
+                log_sayfasi.clear()
+                time.sleep(1.0)
+            else:
+                raise e
 
 
 cal_service, drive_service, gc = google_servisleri()
@@ -198,18 +215,19 @@ def guvenli_ad(s: str, uzunluk: int = 80) -> str:
 
 
 def klasor_bul_olustur(parent_id: str, ad: str):
+    _, drv, _ = google_servisleri()
     q = (
         f"name='{q_kacir(ad)}' and '{q_kacir(parent_id)}' in parents "
         f"and mimeType='application/vnd.google-apps.folder' and trashed=false"
     )
-    mevcut = drive_service.files().list(
+    mevcut = drv.files().list(
         q=q, fields="files(id, webViewLink)",
         supportsAllDrives=True, includeItemsFromAllDrives=True,
     ).execute().get("files", [])
     if mevcut:
         f = mevcut[0]
     else:
-        f = drive_service.files().create(
+        f = drv.files().create(
             body={"name": ad, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]},
             fields="id, webViewLink", supportsAllDrives=True,
         ).execute()
@@ -217,8 +235,9 @@ def klasor_bul_olustur(parent_id: str, ad: str):
 
 
 def drive_yukle(parent_id: str, ad: str, icerik: bytes, mimetype: str):
+    _, drv, _ = google_servisleri()
     media = MediaIoBaseUpload(io.BytesIO(icerik), mimetype=mimetype or "application/octet-stream", resumable=True)
-    drive_service.files().create(
+    drv.files().create(
         body={"name": ad, "parents": [parent_id]},
         media_body=media, fields="id", supportsAllDrives=True,
     ).execute()
@@ -227,7 +246,8 @@ def drive_yukle(parent_id: str, ad: str, icerik: bytes, mimetype: str):
 # --- Sheet & Değişiklik Kaydı (Önbellekli Okuma + Satır Doğrulama) ---
 @st.cache_resource
 def is_listesi():
-    sh = gc.open_by_key(SHEET_ID)
+    _, _, gc_ = google_servisleri()
+    sh = gc_.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet("Klinik_Is_Listesi")
     except gspread.WorksheetNotFound:
@@ -249,13 +269,16 @@ def is_listesi():
 
 @st.cache_data(ttl=20, show_spinner=False)
 def kayitlari_oku():
-    ws, _ = is_listesi()
-    return ws.get_all_records()
+    def _oku():
+        ws, _ = is_listesi()
+        return ws.get_all_records()
+    return baglanti_korumali(_oku)
 
 
 @st.cache_resource
 def log_sayfasi():
-    sh = gc.open_by_key(SHEET_ID)
+    _, _, gc_ = google_servisleri()
+    sh = gc_.open_by_key(SHEET_ID)
     try:
         return sh.worksheet("Islem_Gecmisi")
     except gspread.WorksheetNotFound:
@@ -266,13 +289,15 @@ def log_sayfasi():
 
 def log_yaz(protokol: str, islem: str, detay: str = ""):
     try:
-        log_sayfasi().append_row([
-            simdi().strftime("%Y-%m-%d %H:%M:%S"),
-            st.session_state.get("rol", ""),
-            protokol,
-            islem,
-            detay,
-        ], value_input_option="RAW")
+        def _log():
+            log_sayfasi().append_row([
+                simdi().strftime("%Y-%m-%d %H:%M:%S"),
+                st.session_state.get("rol", ""),
+                protokol,
+                islem,
+                detay,
+            ], value_input_option="RAW")
+        baglanti_korumali(_log)
     except Exception as e:
         st.toast(f"⚠️ İşlem geçmişine yazılamadı: {e}")
 
@@ -282,20 +307,25 @@ class SatirDegisti(Exception):
 
 
 def satir_guncelle(ws, baslik, satir_no: int, alanlar: dict, protokol: str = "", log_islem: str = ""):
-    if protokol:
-        mevcut = ws.cell(satir_no, baslik.index("Protokol") + 1).value or ""
-        eski = alanlar.get("_eski_protokol", protokol)
-        if mevcut.strip() != str(eski).strip():
-            kayitlari_oku.clear()
-            raise SatirDegisti("Liste değişmiş görünüyor, sayfayı yenileyip tekrar deneyin.")
-    alanlar = {k: v for k, v in alanlar.items() if not k.startswith("_")}
-    alanlar["Son_Guncelleme"] = simdi().strftime("%Y-%m-%d %H:%M")
-    for ad, deger in alanlar.items():
-        if ad in baslik:
-            ws.update_cell(satir_no, baslik.index(ad) + 1, deger)
+    def _guncelle():
+        ws_akt, baslik_akt = is_listesi()
+        if protokol:
+            mevcut = ws_akt.cell(satir_no, baslik_akt.index("Protokol") + 1).value or ""
+            eski = alanlar.get("_eski_protokol", protokol)
+            if mevcut.strip() != str(eski).strip():
+                kayitlari_oku.clear()
+                raise SatirDegisti("Liste değişmiş görünüyor, sayfayı yenileyip tekrar deneyin.")
+        temiz_alanlar = {k: v for k, v in alanlar.items() if not k.startswith("_")}
+        temiz_alanlar["Son_Guncelleme"] = simdi().strftime("%Y-%m-%d %H:%M")
+        for ad, deger in temiz_alanlar.items():
+            if ad in baslik_akt:
+                ws_akt.update_cell(satir_no, baslik_akt.index(ad) + 1, deger)
+        return temiz_alanlar
+
+    temiz_alanlar = baglanti_korumali(_guncelle)
     kayitlari_oku.clear()
     if log_islem:
-        log_yaz(protokol, log_islem, json.dumps(alanlar, ensure_ascii=False))
+        log_yaz(protokol, log_islem, json.dumps(temiz_alanlar, ensure_ascii=False))
 
 
 def guvenli_guncelle(*args, **kwargs) -> bool:
@@ -309,20 +339,24 @@ def guvenli_guncelle(*args, **kwargs) -> bool:
     return False
 
 
-# --- Yapay zekâ ---
+# --- Yapay zekâ (Metin + İntermedya Ekran Görüntüsü OCR Desteği) ---
 def json_coz(metin: str) -> dict:
     m = (metin or "").strip()
     m = re.sub(r"^```(?:json)?\s*|\s*```$", "", m)
     return json.loads(m)
 
 
-def llm_json(sistem: str, kullanici: str) -> dict:
+def llm_json(sistem: str, kullanici: str, gorsel_listesi=None) -> dict:
     if st.secrets.get("GEMINI_API_KEY"):
         from google import genai
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+        icerik = [kullanici]
+        if gorsel_listesi:
+            for g in gorsel_listesi:
+                icerik.append(g)
         r = client.models.generate_content(
             model=st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            contents=kullanici,
+            contents=icerik,
             config={
                 "system_instruction": sistem,
                 "response_mime_type": "application/json",
@@ -350,7 +384,7 @@ def cikis_butonu():
 
 
 # ==============================================================================
-# MOD A: ASİSTAN MASASI
+# MOD A: ASİSTAN MASASI (TÜM KLİNİK BİLGİLER AÇIK - VERİ GİZLEME YOK)
 # ==============================================================================
 if st.session_state.rol == "asistan":
     c1, c2 = st.columns([4, 1])
@@ -400,17 +434,17 @@ if st.session_state.rol == "asistan":
         ikon = "🚨" if bayrak else ("🔴" if gecikmis else ("✅" if islendi else "⏳"))
         kategori = row.get("Takip_Kategorisi", "Rutin Kontrol")
         baslik_metni = (
-            f"{ikon} {row.get('Tarih', '')} | {prot} — "
+            f"{ikon} {row.get('Tarih', '')} | {prot} ({row.get('Hasta_Ad_Maskeli', '')}) — "
             f"{row.get('Tani_Bolge', '')} [{kategori}] · {durum}"
         )
 
         with st.expander(baslik_metni, expanded=bool(bayrak) or (not islendi) or gecikmis):
             if bayrak:
-                st.error(f"🚨 KIRMIZI BAYRAK ({bayrak}) — Standart mesaj göndermeyin, ÖNCE HEKİME SORUN!")
+                st.warning(f"🚨 KIRMIZI BAYRAK UYARISI ({bayrak}) — Mesaj gönderirken hekim bilgisi dahilinde hareket edin.")
             if prot.startswith("ATANMAMIS"):
                 st.warning("Bu kayıt henüz bir protokole eşleştirilmedi.")
 
-            st.markdown("**1. İntermedya Standart Tıbbi Kayıt:**")
+            st.markdown("**1. İntermedya Standart Tıbbi Kayıt (Tam Klinik Detay):**")
             st.code(row.get("Intermedya_Epikriz", ""), language="text")
 
             drive_link = row.get("Drive_Klasor_Linki", "")
@@ -424,9 +458,7 @@ if st.session_state.rol == "asistan":
             a1, a2 = st.columns(2)
             with a1:
                 tel = temiz_telefon(row.get("Telefon", ""))
-                if bayrak:
-                    st.warning("Kırmızı bayrak nedeniyle otomatik WhatsApp kilitli.")
-                elif telefon_gecerli(tel):
+                if telefon_gecerli(tel):
                     sablon_sec = st.selectbox(
                         "Mesaj şablonu", list(WA_SABLONLARI.keys()), key=f"sab_{satir_no}"
                     )
@@ -486,24 +518,23 @@ tab_giris, tab_hafiza, tab_eslestir, tab_brifing = st.tabs([
 
 ANALIZ_KOMUTU = """
 Sen Prof. Dr. Alper Gökçe'nin (Ortopedi ve Travmatoloji) klinik asistanısın. Bugünün tarihi: {bugun}.
-Ham metni yapılandır ve SADECE geçerli JSON döndür.
+Ham metni ve varsa eklenen İntermedya ekran görüntüsünü yapılandır ve SADECE geçerli JSON döndür.
 
 KESİN KURALLAR:
-- Metinde açıkça geçmeyen bulgu, test, tanı veya tedaviyi ASLA uydurma. Bilinmeyen alana "Belirtilmedi" yaz.
+- Eğer ekte İntermedya ekran görüntüsü varsa: 'F6 Protokol No' kutusundaki numarayı 'protokol' alanına, 'Cep' telefonunu 'telefon' alanına (05XXXXXXXXX biçiminde), ad-soyad baş harflerini 'hasta_maskeli' alanına, ekrandaki ICD-10 kodunu ve açıklamasını 'icd10_kodu' ve 'bolge_tani' alanlarına, 'Şikayetleri', 'Hikayesi', 'Bulgular', 'Tetkik', 'Tedavi' alanlarını ise 'intermedya_epikriz' şablonuna eksiksiz aktar.
+- Metinde veya görselde açıkça geçmeyen bulgu, test, tanı veya tedaviyi ASLA uydurma. Bilinmeyen alana "Belirtilmedi" yaz.
 - Yalnızca bariz ses tanıma yazım hatalarını doğru tıbbi terime çevir.
-- ICD-10 yalnızca öneridir; emin değilsen boş bırak.
-- Kontrol süresi geçiyorsa ("2 hafta sonra") tarihi bugünden hesapla.
-- Metinde telefon numarası geçiyorsa çıkar (onay ekranında hekim doğrulayacak), yoksa boş bırak.
+- Kontrol süresi geçiyorsa ("2 hafta sonra") tarihi bugünden hesapla; ekranda yalnızca bugünün muayenesi görünüyor ve kontrol tarihi yoksa boş bırak.
 
 JSON şeması:
 {{
   "tur": "klinik" veya "sosyal",
-  "protokol": "Metinde açıkça geçen protokol/dosya no, yoksa boş",
-  "hasta_maskeli": "Ad soyad baş harfleri (örn. A.Y.) veya boş",
+  "protokol": "Metinde veya İntermedya ekranında geçen protokol/dosya no, yoksa boş",
+  "hasta_maskeli": "Ad soyad baş harfleri (örn. B.K.) veya boş",
   "telefon": "Varsa 05XXXXXXXXX formatında telefon, yoksa boş",
   "takip_kategorisi": "{kategoriler} değerlerinden biri",
   "bolge_tani": "Anatomik bölge ve kısa tanı",
-  "icd10_kodu": "Önerilen ICD-10 kodu ve adı veya boş",
+  "icd10_kodu": "Önerilen veya ekrandaki ICD-10 kodu ve adı veya boş",
   "intermedya_epikriz": "ŞİKAYET: ...\\nHİKAYE: ...\\nMUAYENE BULGUSU: ...\\nLAB / GÖRÜNTÜLEME: ...\\nTANI (ICD-10): ...\\nTEDAVİ / PLAN: ...",
   "baslik": "Sosyal notlar için kısa başlık",
   "kontrol_var_mi": true veya false,
@@ -524,13 +555,13 @@ with tab_giris:
     ham_metin = st.text_area(
         "2. Ham Metin (Ses Kaydedici / WhatsApp / Yerel Whisper)",
         value=gelen_metin, height=150,
-        placeholder="Örn: Protokol 2026-420, sağ diz medial gonartroz, 2. doz PRP 2 hafta sonra, tel 0532...",
+        placeholder="Örn: Protokol 193818, sağ ayak bileği kontüzyonu, 2 hafta sonra kontrol, tel 0546...",
     )
 
     u1, u2 = st.columns(2)
     with u1:
         goruntu_videolar = st.file_uploader(
-            "3A. Klinik Görsel / Röntgen / Video",
+            "3A. İntermedya Ekran Görüntüsü / Röntgen / Video",
             type=["jpg", "jpeg", "png", "mp4", "mov", "avi"], accept_multiple_files=True,
         )
     with u2:
@@ -541,6 +572,14 @@ with tab_giris:
 
     if st.button("🔍 Analiz Et (Taslak Oluştur)", use_container_width=True):
         metin = ham_metin.strip()
+        gorseller = []
+        if goruntu_videolar:
+            for d in goruntu_videolar:
+                if d.type and d.type.startswith("image/"):
+                    try:
+                        gorseller.append(Image.open(d))
+                    except Exception:
+                        pass
         try:
             if ses_dosyasi is not None:
                 from openai import OpenAI
@@ -549,16 +588,18 @@ with tab_giris:
                         model="whisper-1", file=("kayit.wav", ses_dosyasi.getvalue(), "audio/wav"), language="tr",
                     )
                     metin = (metin + "\n" + tr_.text).strip()
-            if not metin:
-                st.warning("Lütfen ses kaydı alın veya metin girin.")
+            if not metin and not gorseller:
+                st.warning("Lütfen ses kaydı alın, metin girin veya bir İntermedya ekran görüntüsü yükleyin.")
             else:
                 with st.spinner("Taslak hazırlanıyor..."):
+                    girdi_metni = metin or "Ekteki İntermedya hasta ekran görüntüsünü oku ve yapılandır."
                     taslak = llm_json(
                         ANALIZ_KOMUTU.format(bugun=simdi().strftime("%Y-%m-%d"), kategoriler=" / ".join(TAKIP_KATEGORILERI)),
-                        metin,
+                        girdi_metni,
+                        gorsel_listesi=gorseller,
                     )
                 st.session_state.taslak = taslak
-                st.session_state.taslak_metin = metin
+                st.session_state.taslak_metin = girdi_metni
                 st.session_state.taslak_id = str(int(time.time()))
         except Exception as e:
             st.error(f"Analiz başarısız: {e}")
@@ -630,17 +671,27 @@ with tab_giris:
                     if ROOT_DRIVE_FOLDER and dosya_var:
                         try:
                             klasor_adi = f"{an.year}_{guvenli_ad(protokol)}" if klinik else f"{an.year}_Kisisel_Notlar"
-                            drive_klasor_id, drive_link = klasor_bul_olustur(ROOT_DRIVE_FOLDER, klasor_adi)
+                            drive_klasor_id, drive_link = baglanti_korumali(
+                                lambda: klasor_bul_olustur(ROOT_DRIVE_FOLDER, klasor_adi)
+                            )
                             damga = an.strftime("%Y%m%d_%H%M")
                             if goruntu_videolar:
-                                gv_id, _ = klasor_bul_olustur(drive_klasor_id, "01_Goruntu_ve_Video")
+                                gv_id, _ = baglanti_korumali(
+                                    lambda: klasor_bul_olustur(drive_klasor_id, "01_Goruntu_ve_Video")
+                                )
                                 for d in goruntu_videolar:
-                                    drive_yukle(gv_id, f"{damga}_{guvenli_ad(d.name, 120)}", d.getvalue(), d.type)
+                                    baglanti_korumali(
+                                        lambda d=d: drive_yukle(gv_id, f"{damga}_{guvenli_ad(d.name, 120)}", d.getvalue(), d.type)
+                                    )
                                     yuklenenler.append(d.name)
                             if onam_belgeleri:
-                                on_id, _ = klasor_bul_olustur(drive_klasor_id, "02_Aydinlatilmis_Onam_ve_Evrak")
+                                on_id, _ = baglanti_korumali(
+                                    lambda: klasor_bul_olustur(drive_klasor_id, "02_Aydinlatilmis_Onam_ve_Evrak")
+                                )
                                 for d in onam_belgeleri:
-                                    drive_yukle(on_id, f"{damga}_{guvenli_ad(d.name, 120)}", d.getvalue(), d.type)
+                                    baglanti_korumali(
+                                        lambda d=d: drive_yukle(on_id, f"{damga}_{guvenli_ad(d.name, 120)}", d.getvalue(), d.type)
+                                    )
                                     yuklenenler.append(d.name)
                         except HttpError:
                             drive_uyari = (
@@ -650,8 +701,9 @@ with tab_giris:
 
                     drive_satiri = f"\n📁 Drive: {drive_link}" if drive_link else ""
 
+                    # KVKK UYUMLU TAKVİM BAŞLIĞI: Tanı başlıkta gizli, yalnızca Protokol + Kategori
                     if klinik:
-                        ana_baslik = f"[{protokol}] | {kategori} | {bolge_tani}"
+                        ana_baslik = f"[{protokol}] | {kategori}"
                         ana_aciklama = f"{epikriz}{drive_satiri}"
                         renk = "11"
                     else:
@@ -659,49 +711,54 @@ with tab_giris:
                         ana_aciklama = f"{epikriz or st.session_state.taslak_metin}{drive_satiri}"
                         renk = "10"
 
-                    ev_ana = cal_service.events().insert(calendarId=CALENDAR_ID, body={
-                        "summary": ana_baslik, "description": ana_aciklama, "colorId": renk,
-                        "start": {"dateTime": an.isoformat(), "timeZone": "Europe/Istanbul"},
-                        "end": {"dateTime": (an + timedelta(minutes=20)).isoformat(), "timeZone": "Europe/Istanbul"},
-                    }).execute()
-                    takvim_event_id = ev_ana.get("id", "")
-
-                    kontrol_event_id = ""
-                    if k_var and k_tarih:
-                        k_dt = datetime.combine(k_tarih, dtime(10, 0), tzinfo=TR)
-                        k_baslik = f"🔔 [{protokol}] {kategori.upper()} | {bolge_tani}" if klinik else f"🔔 {k_not or ana_baslik}"
-                        ev_k = cal_service.events().insert(calendarId=CALENDAR_ID, body={
-                            "summary": k_baslik, "description": f"{k_not}{drive_satiri}\n\n{epikriz}", "colorId": "6",
-                            "start": {"dateTime": k_dt.isoformat(), "timeZone": "Europe/Istanbul"},
-                            "end": {"dateTime": (k_dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Istanbul"},
-                            "reminders": {"useDefault": False, "overrides": [
-                                {"method": "popup", "minutes": 1440}, {"method": "popup", "minutes": 120}]},
+                    def _takvim_ve_sheet_yaz():
+                        cal_akt, _, _ = google_servisleri()
+                        ev_ana = cal_akt.events().insert(calendarId=CALENDAR_ID, body={
+                            "summary": ana_baslik, "description": ana_aciklama, "colorId": renk,
+                            "start": {"dateTime": an.isoformat(), "timeZone": "Europe/Istanbul"},
+                            "end": {"dateTime": (an + timedelta(minutes=20)).isoformat(), "timeZone": "Europe/Istanbul"},
                         }).execute()
-                        kontrol_event_id = ev_k.get("id", "")
+                        t_eid = ev_ana.get("id", "")
 
+                        k_eid = ""
+                        if k_var and k_tarih:
+                            k_dt = datetime.combine(k_tarih, dtime(10, 0), tzinfo=TR)
+                            k_baslik = f"🔔 [{protokol}] {kategori.upper()}" if klinik else f"🔔 {k_not or ana_baslik}"
+                            ev_k = cal_akt.events().insert(calendarId=CALENDAR_ID, body={
+                                "summary": k_baslik, "description": f"{k_not}{drive_satiri}\n\n{epikriz}", "colorId": "6",
+                                "start": {"dateTime": k_dt.isoformat(), "timeZone": "Europe/Istanbul"},
+                                "end": {"dateTime": (k_dt + timedelta(minutes=30)).isoformat(), "timeZone": "Europe/Istanbul"},
+                                "reminders": {"useDefault": False, "overrides": [
+                                    {"method": "popup", "minutes": 1440}, {"method": "popup", "minutes": 120}]},
+                            }).execute()
+                            k_eid = ev_k.get("id", "")
+
+                        if klinik and kategori != "Fatura-Vergi":
+                            ws_akt, baslik_akt = is_listesi()
+                            degerler = {
+                                "Tarih": an.strftime("%Y-%m-%d %H:%M"),
+                                "Protokol": protokol,
+                                "Hasta_Ad_Maskeli": hasta_maskeli,
+                                "Telefon": tel_temiz if telefon.strip() else "",
+                                "Tani_Bolge": f"{bolge_tani} ({icd10})" if icd10 else bolge_tani,
+                                "Intermedya_Epikriz": epikriz,
+                                "Kontrol_Tarihi": k_tarih.isoformat() if k_var else "",
+                                "Kontrol_Notu": k_not if k_var else "",
+                                "Intermedya_Islendi": "HAYIR",
+                                "WA_Gonderildi": "HAYIR",
+                                "Takip_Kategorisi": kategori,
+                                "Drive_Klasor_Linki": drive_link,
+                                "Takip_Durumu": "Bekliyor" if k_var else "",
+                                "Son_Guncelleme": an.strftime("%Y-%m-%d %H:%M"),
+                                "Kirmizi_Bayrak": bayrak,
+                                "Takvim_Event_ID": t_eid,
+                                "Kontrol_Event_ID": k_eid,
+                                "Drive_Klasor_ID": drive_klasor_id,
+                            }
+                            ws_akt.append_row([degerler.get(h, "") for h in baslik_akt], value_input_option="RAW")
+
+                    baglanti_korumali(_takvim_ve_sheet_yaz)
                     if klinik and kategori != "Fatura-Vergi":
-                        ws, baslik = is_listesi()
-                        degerler = {
-                            "Tarih": an.strftime("%Y-%m-%d %H:%M"),
-                            "Protokol": protokol,
-                            "Hasta_Ad_Maskeli": hasta_maskeli,
-                            "Telefon": tel_temiz if telefon.strip() else "",
-                            "Tani_Bolge": f"{bolge_tani} ({icd10})" if icd10 else bolge_tani,
-                            "Intermedya_Epikriz": epikriz,
-                            "Kontrol_Tarihi": k_tarih.isoformat() if k_var else "",
-                            "Kontrol_Notu": k_not if k_var else "",
-                            "Intermedya_Islendi": "HAYIR",
-                            "WA_Gonderildi": "HAYIR",
-                            "Takip_Kategorisi": kategori,
-                            "Drive_Klasor_Linki": drive_link,
-                            "Takip_Durumu": "Bekliyor" if k_var else "",
-                            "Son_Guncelleme": an.strftime("%Y-%m-%d %H:%M"),
-                            "Kirmizi_Bayrak": bayrak,
-                            "Takvim_Event_ID": takvim_event_id,
-                            "Kontrol_Event_ID": kontrol_event_id,
-                            "Drive_Klasor_ID": drive_klasor_id,
-                        }
-                        ws.append_row([degerler.get(h, "") for h in baslik], value_input_option="RAW")
                         kayitlari_oku.clear()
                         log_yaz(protokol, "Yeni_Kayit", f"{kategori} | {bolge_tani}")
 
@@ -712,6 +769,14 @@ with tab_giris:
             for k in ("taslak", "taslak_metin", "taslak_id"):
                 st.session_state.pop(k, None)
             st.success(f"✅ Kaydedildi: {ana_baslik}")
+            if klinik and telefon_gecerli(tel_temiz):
+                t_bilgi = f"{k_tarih.strftime('%d.%m.%Y')} tarihli " if (k_var and k_tarih) else ""
+                wp_msg = WA_SABLONLARI["Rutin Kontrol"].format(tarih=t_bilgi)
+                st.link_button(
+                    "📲 Hastaya Şimdi WhatsApp Bilgi Mesajı Gönder",
+                    f"https://wa.me/{tel_temiz}?text={urllib.parse.quote(wp_msg)}",
+                    use_container_width=True,
+                )
             if drive_uyari:
                 st.warning(drive_uyari)
             if protokol.startswith("ATANMAMIS"):
@@ -814,19 +879,20 @@ with tab_eslestir:
                             yeni_p, f"Eslestirme:{eski_prot}->{yeni_p}"
                         )
                         if guncellendi:
+                            cal_akt, drv_akt, _ = google_servisleri()
                             for eid_col in ("Takvim_Event_ID", "Kontrol_Event_ID"):
                                 eid = str(r.get(eid_col, "")).strip()
                                 if eid:
                                     try:
-                                        ev = cal_service.events().get(calendarId=CALENDAR_ID, eventId=eid).execute()
+                                        ev = cal_akt.events().get(calendarId=CALENDAR_ID, eventId=eid).execute()
                                         ev["summary"] = ev.get("summary", "").replace(eski_prot, yeni_p)
-                                        cal_service.events().update(calendarId=CALENDAR_ID, eventId=eid, body=ev).execute()
+                                        cal_akt.events().update(calendarId=CALENDAR_ID, eventId=eid, body=ev).execute()
                                     except Exception:
                                         pass
                             did = str(r.get("Drive_Klasor_ID", "")).strip()
                             if did:
                                 try:
-                                    drive_service.files().update(
+                                    drv_akt.files().update(
                                         fileId=did,
                                         body={"name": f"{simdi().year}_{guvenli_ad(yeni_p)}"},
                                         supportsAllDrives=True,
@@ -848,12 +914,13 @@ with tab_brifing:
             with st.spinner("Takvim ve klinik kayıtlar analiz ediliyor..."):
                 an = simdi()
                 bugun = an.date()
-                events = cal_service.events().list(
+                cal_akt, _, _ = google_servisleri()
+                events = baglanti_korumali(lambda: cal_akt.events().list(
                     calendarId=CALENDAR_ID,
                     timeMin=(an - timedelta(days=1)).isoformat(),
                     timeMax=(an + timedelta(days=gun_sayisi)).isoformat(),
                     singleEvents=True, orderBy="startTime",
-                ).execute().get("items", [])
+                ).execute().get("items", []))
                 takvim = "\n".join(
                     f"- [{ev['start'].get('dateTime', ev['start'].get('date', ''))}] {ev.get('summary', '')}"
                     f" :: {ev.get('description', '').replace(chr(10), ' ')[:300]}"
